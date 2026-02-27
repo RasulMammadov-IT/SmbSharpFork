@@ -10,12 +10,11 @@
         /// Enumerates all files in the specified directory on an SMB share.
         /// </summary>
         /// <param name="directory">The SMB directory path (e.g., "//server/share/path" or "\\server\share\path")</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
         /// <returns>A collection of file names in the directory (not full paths, just file names)</returns>
         /// <exception cref="DirectoryNotFoundException">Thrown when the directory does not exist or is not accessible</exception>
         /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
         /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
-        Task<IEnumerable<string>> EnumerateFilesAsync(string directory, CancellationToken cancellationToken = default);
+        IAsyncEnumerable<string> EnumerateAllFilesAsync(string directory, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Checks if a file exists in the specified directory on an SMB share.
@@ -27,7 +26,7 @@
         /// <exception cref="DirectoryNotFoundException">Thrown when the directory does not exist or is not accessible</exception>
         /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
         /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
-        Task<bool> FileExistsAsync(string fileName, string directory, CancellationToken cancellationToken = default);
+        Task<bool> FileExistsAsync(string filePath, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Opens a file for reading from an SMB share and returns a stream.
@@ -44,7 +43,7 @@
         /// On Windows, returns a FileStream to the UNC path directly.
         /// On non-Windows platforms, downloads the file to a temporary location and returns a FileStream with DeleteOnClose.
         /// </remarks>
-        Task<Stream> ReadFileAsync(string directory, string filePath, CancellationToken cancellationToken = default);
+        Task<Stream> ReadFileAsync(string filePath, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Writes a string to a file on an SMB share, creating or overwriting the file.

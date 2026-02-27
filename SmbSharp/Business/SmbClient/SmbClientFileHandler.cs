@@ -1,4 +1,8 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using SmbSharp.Business.Interfaces;
 using SmbSharp.Enums;
@@ -87,98 +91,185 @@ namespace SmbSharp.Business.SmbClient
             _domain = domain;
         }
 
-        public async Task<IEnumerable<string>> EnumerateFilesAsync(string smbPath,
+        public async IAsyncEnumerable<string> EnumerateFilesAsync(string smbPath,
             CancellationToken cancellationToken = default)
         {
             var files = new List<string>();
-            try
-            {
-                // Parse SMB path: //server/share/path or \\server\share\path
-                var (server, share, path) = ParseSmbPath(smbPath);
+            Queue<FileEntry> directories = new();
 
-                var command = string.IsNullOrEmpty(path) ? "ls" : $"ls {path}/*";
-
-                string output;
-                try
-                {
-                    output = await ExecuteSmbClientCommandAsync(server, share, command, smbPath, cancellationToken);
-                }
-                catch (FileNotFoundException) when (!string.IsNullOrEmpty(path))
-                {
-                    // smbclient returns NT_STATUS_NO_SUCH_FILE when ls path/* is run on an empty directory.
-                    // Verify the directory itself exists before returning empty; re-throw if it doesn't.
-                    await ExecuteSmbClientCommandAsync(server, share, $"ls \"{path}\"", smbPath, cancellationToken);
-                    return files;
-                }
-
-                // Parse smbclient ls output. Format per line (2 leading spaces):
-                //   filename                            A      1234  Mon Jan  1 00:00:00 2024
-                // Filenames may contain spaces, so we match via regex rather than whitespace split.
-                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                foreach (var line in lines)
-                {
-                    if (line.Contains("blocks of size") || line.Contains("blocks available"))
-                        continue;
-
-                    var match = SmbLsLineRegexInstance.Match(line);
-                    if (!match.Success)
-                        continue;
-
-                    var fileName = match.Groups[1].Value;
-                    var attributes = match.Groups[2].Value;
-
-                    // Skip . and .. entries and directories
-                    if (fileName == "." || fileName == ".." || attributes.Contains('D'))
-                        continue;
-
-                    files.Add(fileName);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error enumerating files in SMB path: {SmbPath}", smbPath);
-                throw;
-            }
-
-            return files;
-        }
-
-        public async Task<bool> FileExistsAsync(string fileName, string smbPath,
-            CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var files = await EnumerateFilesAsync(smbPath, cancellationToken);
-                return files.Any(f => f.Equals(fileName, StringComparison.OrdinalIgnoreCase));
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error checking if file exists: {FileName} in {SmbPath}", fileName, smbPath);
-                throw;
-            }
-        }
-
-        public async Task<Stream> GetFileStreamAsync(string smbPath, string fileName,
-            CancellationToken cancellationToken = default)
-        {
             // Parse SMB path: //server/share/path or \\server\share\path
-            var (server, share, remotePath) = ParseSmbPath(smbPath);
+            var (server, share, path) = ParseSmbPath(smbPath);
+
+            // TODO : check if it is directory
+            directories.Enqueue(new FileEntry()
+            {
+                RelativeFullPath = path,
+                SMBFullPath = smbPath,
+                IsDirectory = true
+            });
+
+            while (directories.Count > 0)
+            {
+                var currentFileEntry = directories.Dequeue();
+
+                var entriesInScope = await EnumerateInternalAsync(server, share, currentFileEntry.RelativeFullPath, currentFileEntry.SMBFullPath!, cancellationToken);
+
+                foreach (var entry in entriesInScope)
+                {
+                    if (entry.IsDirectory)
+                    {
+                        directories.Enqueue(entry);
+                    }
+                    else
+                    {
+                        yield return entry.SMBFullPath!;
+                    }
+                }
+            }
+
+            yield break;
+        }
+
+        private async Task<List<FileEntry>> EnumerateInternalAsync(string server,
+                                                                   string share,
+                                                                   string? relativeCurrentPath,
+                                                                   string directorySmbFullPath,
+                                                                   CancellationToken cancellationToken)
+        {
+            List<FileEntry> entries = new();
+
+            var command = string.IsNullOrEmpty(relativeCurrentPath)
+                ? "ls"
+                : $"cd \"{relativeCurrentPath}\"; ls";
+
+
+            string output = null;
+
+            try
+            {
+                output = await ExecuteSmbClientCommandAsync(
+                    server,
+                    share,
+                    command,
+                    directorySmbFullPath,
+                    false,
+                    cancellationToken);
+            }
+            catch (FileNotFoundException) when (!string.IsNullOrEmpty(relativeCurrentPath))
+            {
+                // smbclient returns NT_STATUS_NO_SUCH_FILE when ls path/* is run on an empty directory.
+                // Verify the directory itself exists before returning empty; re-throw if it doesn't.
+                await ExecuteSmbClientCommandAsync(server, share, $"ls \"{relativeCurrentPath}\"", directorySmbFullPath, false, cancellationToken);
+
+                return entries;
+            }
+
+            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+            // Parse smbclient ls output. Format per line (2 leading spaces):
+            //   filename                            A      1234  Mon Jan  1 00:00:00 2024
+            // Filenames may contain spaces, so we match via regex rather than whitespace split.
+            foreach (var line in lines)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (line.Contains("blocks of size") || line.Contains("blocks available"))
+                    continue;
+
+                var match = SmbLsLineRegexInstance.Match(line);
+                if (!match.Success)
+                    continue;
+
+                var objectName = match.Groups[1].Value;
+                var attributes = match.Groups[2].Value;
+
+                // Skip . and ..
+                if (objectName == "." || objectName == "..")
+                    continue;
+
+                var relativeFullPath = string.IsNullOrEmpty(relativeCurrentPath)
+                    ? objectName
+                    : $"{relativeCurrentPath}/{objectName}";
+
+                var smbFullPath = string.IsNullOrEmpty(directorySmbFullPath)
+                    ? objectName
+                    : $"{directorySmbFullPath}/{objectName}";
+
+                var entry = new FileEntry
+                {
+                    ObjectName = objectName,
+                    RelativeFullPath = relativeFullPath,
+                    SMBFullPath = smbFullPath,
+                    IsDirectory = attributes.Contains("D")
+                };
+
+                entries.Add(entry);
+            }
+
+            return entries;
+        }
+
+        private class FileEntry
+        {
+            public string? ObjectName { get; set; }
+            public string? RelativeFullPath { get; set; }
+            public string? SMBFullPath { get; set; }
+            public bool IsDirectory { get; set; }
+        }
+
+        public async Task<bool> FileExistsAsync(string filePath,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var (fileName, directoryName) = GetFileAndDirectoryName(filePath);
+
+                // Parse SMB path: //server/share/path or \\server\share\path
+                var (server, share, relatedDirectoryPath) = ParseSmbPath(directoryName!);
+
+
+                var fileEntries = await EnumerateInternalAsync(server, share, relatedDirectoryPath, directoryName, cancellationToken);
+
+                foreach (var fileEntry in fileEntries)
+                {
+                    if (fileEntry.IsDirectory == false && string.Equals(fileEntry.ObjectName, fileName, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking if file exists. FilePath : {FilePath}", filePath);
+                throw;
+            }
+        }
+
+        public async Task<Stream> GetFileStreamAsync(string filePath,
+            CancellationToken cancellationToken = default)
+        {
+            var (fileName, directoryName) = GetFileAndDirectoryName(filePath);
+
+            // Parse SMB path: //server/share/path or \\server\share\path
+            var (server, share, remoteFilePath) = ParseSmbPath(filePath);
 
             // Create a temporary local file
             var tempFilePath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_{fileName}");
 
-            // Download file using smbclient
-            var remoteFilePath = string.IsNullOrEmpty(remotePath)
-                ? fileName
-                : $"{remotePath}/{fileName}";
-
             var command = $"get \"{remoteFilePath}\" \"{tempFilePath}\"";
-            await ExecuteSmbClientCommandAsync(server, share, command, smbPath, cancellationToken);
+            await ExecuteSmbClientCommandAsync(server, share, command, filePath, false, cancellationToken);
 
             if (!File.Exists(tempFilePath))
             {
                 throw new FileNotFoundException(
-                    $"Failed to download file {fileName} from {smbPath}");
+                    $"Failed to download file {fileName} from {filePath}");
             }
 
             // Return a FileStream with DeleteOnClose option to auto-cleanup temp file
@@ -186,17 +277,19 @@ namespace SmbSharp.Business.SmbClient
                 FileOptions.DeleteOnClose | FileOptions.Asynchronous);
         }
 
-        public async Task<bool> WriteFileAsync(string smbPath, string fileName, Stream stream,
+        public async Task<bool> WriteFileAsync(string filePath, Stream stream,
             CancellationToken cancellationToken = default)
         {
-            return await WriteFileAsync(smbPath, fileName, stream, FileWriteMode.Overwrite, cancellationToken);
+            return await WriteFileAsync(filePath, stream, FileWriteMode.Overwrite, cancellationToken);
         }
 
-        public async Task<bool> WriteFileAsync(string smbPath, string fileName, Stream stream,
+        public async Task<bool> WriteFileAsync(string filePath, Stream stream,
             FileWriteMode writeMode, CancellationToken cancellationToken = default)
         {
+            var (fileName, directoryName) = GetFileAndDirectoryName(filePath);
+
             // Parse SMB path: //server/share/path or \\server\share\path
-            var (server, share, remotePath) = ParseSmbPath(smbPath);
+            var (server, share, remotePath) = ParseSmbPath(directoryName);
 
             // Create a temporary local file to upload
             var tempFilePath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_{fileName}");
@@ -214,9 +307,9 @@ namespace SmbSharp.Business.SmbClient
                     try
                     {
                         var checkCommand = $"ls \"{remoteFilePath}\"";
-                        await ExecuteSmbClientCommandAsync(server, share, checkCommand, smbPath, cancellationToken);
+                        await ExecuteSmbClientCommandAsync(server, share, checkCommand, directoryName, false, cancellationToken);
                         // If we get here, file exists
-                        throw new IOException($"File already exists: {smbPath}/{fileName}");
+                        throw new IOException($"File already exists: {directoryName}/{fileName}");
                     }
                     catch (FileNotFoundException)
                     {
@@ -231,7 +324,7 @@ namespace SmbSharp.Business.SmbClient
                         var existingTempFile =
                             Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_existing_{fileName}");
                         var getCommand = $"get \"{remoteFilePath}\" \"{existingTempFile}\"";
-                        await ExecuteSmbClientCommandAsync(server, share, getCommand, smbPath, cancellationToken);
+                        await ExecuteSmbClientCommandAsync(server, share, getCommand, directoryName, false, cancellationToken);
 
                         // Copy existing file to temp file, then append new content
                         await using (var fileStream = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write))
@@ -265,7 +358,7 @@ namespace SmbSharp.Business.SmbClient
 
                 // Upload file using smbclient
                 var command = $"put \"{tempFilePath}\" \"{remoteFilePath}\"";
-                await ExecuteSmbClientCommandAsync(server, share, command, smbPath, cancellationToken);
+                await ExecuteSmbClientCommandAsync(server, share, command, directoryName, false, cancellationToken);
 
                 return true;
             }
@@ -279,19 +372,16 @@ namespace SmbSharp.Business.SmbClient
             }
         }
 
-        public async Task<bool> DeleteFileAsync(string smbPath, string fileName,
+        public async Task<bool> DeleteFileAsync(string filePath,
             CancellationToken cancellationToken = default)
         {
-            // Parse SMB path: //server/share/path or \\server\share\path
-            var (server, share, remotePath) = ParseSmbPath(smbPath);
+            var (fileName, directoryName) = GetFileAndDirectoryName(filePath);
 
-            // Delete file using smbclient
-            var remoteFilePath = string.IsNullOrEmpty(remotePath)
-                ? fileName
-                : $"{remotePath}/{fileName}";
+            // Parse SMB path: //server/share/path or \\server\share\path
+            var (server, share, remoteFilePath) = ParseSmbPath(filePath);
 
             var command = $"del \"{remoteFilePath}\"";
-            await ExecuteSmbClientCommandAsync(server, share, command, smbPath, cancellationToken);
+            await ExecuteSmbClientCommandAsync(server, share, command, filePath, false, cancellationToken);
 
             return true;
         }
@@ -306,27 +396,45 @@ namespace SmbSharp.Business.SmbClient
                 throw new ArgumentException("Directory path cannot be empty", nameof(smbPath));
             }
 
+            if (await DirectoryExistAsync(server, share, remotePath, smbPath, cancellationToken))
+            {
+                return true;
+            }
+
+            var command = $"mkdir \"{remotePath}\"";
+            await ExecuteSmbClientCommandAsync(server, share, command, smbPath, false, cancellationToken);
+
+            return true;
+        }
+
+        private async Task<bool> DirectoryExistAsync(string server, string share, string relativeDirectory, string smbPath, CancellationToken cancellationToken = default)
+        {
+
+            if (string.IsNullOrEmpty(relativeDirectory))
+            {
+                throw new ArgumentException("Directory path cannot be empty", nameof(smbPath));
+            }
+
             // Check if directory already exists to make this operation idempotent (consistent with Windows behavior)
             try
             {
-                var checkCommand = $"ls \"{remotePath}\"";
-                await ExecuteSmbClientCommandAsync(server, share, checkCommand, smbPath, cancellationToken);
+                var checkCommand = string.IsNullOrEmpty(relativeDirectory)
+                    ? "ls"
+                    : $"cd \"{relativeDirectory}\"; ls";
+
+                await ExecuteSmbClientCommandAsync(server, share, checkCommand, smbPath, false, cancellationToken);
+
                 // If we reach here, the directory exists - return true (idempotent behavior)
                 return true;
             }
             catch (FileNotFoundException)
             {
-                // Directory doesn't exist, proceed to create it
+                return false;
             }
-
-            var command = $"mkdir \"{remotePath}\"";
-            await ExecuteSmbClientCommandAsync(server, share, command, smbPath, cancellationToken);
-
-            return true;
         }
 
         private async Task<string> ExecuteSmbClientCommandAsync(string server, string share, string command,
-            string contextPath, CancellationToken cancellationToken = default)
+            string contextPath, bool useMachineReadableFormat = false, CancellationToken cancellationToken = default)
         {
             string? credentialsFile = null;
 
@@ -384,6 +492,12 @@ namespace SmbSharp.Business.SmbClient
                     argumentList.Add(_useWsl ? ConvertToWslPath(credentialsFile) : credentialsFile);
                 }
 
+                if (useMachineReadableFormat)
+                {
+                    // Use machine-readable output format for easier parsing (no color codes, consistent spacing)
+                    argumentList.Add("-g");
+                }
+
                 // Add command (convert any Windows paths in the command for WSL)
                 argumentList.Add("-c");
                 argumentList.Add(_useWsl ? ConvertWindowsPathsInCommand(command) : command);
@@ -404,6 +518,7 @@ namespace SmbSharp.Business.SmbClient
                 if (errorLower.Contains("does not exist") ||
                     errorLower.Contains("not found") ||
                     errorLower.Contains("nt_status_object_name_not_found") ||
+                    errorLower.Contains("nt_status_object_path_not_found") ||
                     errorLower.Contains("nt_status_no_such_file"))
                 {
                     throw new FileNotFoundException(
@@ -473,7 +588,7 @@ namespace SmbSharp.Business.SmbClient
 
                 // Try to list files to test connection - if path is specified, check that specific directory
                 var command = string.IsNullOrEmpty(path) ? "ls" : $"cd \"{path}\"; ls";
-                await ExecuteSmbClientCommandAsync(server, share, command, directoryPath, cancellationToken);
+                await ExecuteSmbClientCommandAsync(server, share, command, directoryPath, false, cancellationToken);
 
                 return true;
             }
@@ -517,6 +632,23 @@ namespace SmbSharp.Business.SmbClient
                 var rest = match.Groups[3].Value.Replace('\\', '/');
                 return $"/mnt/{drive}/{rest}";
             });
+        }
+        
+        private (string fileName, string directoryName) GetFileAndDirectoryName(string filePath)
+        {
+            filePath = filePath.Replace('\\', '/');
+
+            int lastSlashIndex = filePath.LastIndexOf('/');
+
+            if (lastSlashIndex < 0)
+            {
+                throw new ArgumentException($"Invalid file path format: {filePath}");
+            }
+
+            string directoryName = filePath.Substring(0, lastSlashIndex);
+            string fileName = filePath.Substring(lastSlashIndex + 1);
+
+            return (fileName, directoryName);
         }
     }
 }

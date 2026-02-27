@@ -111,7 +111,7 @@ namespace SmbSharp.Infrastructure
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
             {
                 var argsDisplay = string.Join(" ", argumentList.Select(a =>
-                    a.Contains(" ") ? $"\"{a}\"" : a));
+                a.Contains(" ") ? $"\"{a}\"" : a));
                 _logger.LogDebug("Executing process: {FileName} {Arguments}", fileName, argsDisplay);
 
                 if (environmentVariables != null && environmentVariables.Count > 0)

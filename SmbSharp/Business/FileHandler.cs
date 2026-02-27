@@ -1,4 +1,6 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Collections;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -149,80 +151,75 @@ namespace SmbSharp.Business
         }
 
         /// <inheritdoc/>
-        public async Task<IEnumerable<string>> EnumerateFilesAsync(string directory,
-            CancellationToken cancellationToken = default)
+        public async IAsyncEnumerable<string> EnumerateAllFilesAsync(string directory,
+                                                                     [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(directory))
                 throw new ArgumentException("Directory path cannot be null or empty", nameof(directory));
 
+            // SMB branch
             if (_useSmbClient)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                return await _smbClientFileHandler.EnumerateFilesAsync(directory, cancellationToken);
-            }
-
-            // Use direct IO operations for UNC paths - wrap in Task.Run to avoid blocking
-            return await Task.Run(IEnumerable<string> () =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (!Directory.Exists(directory))
+                await foreach (var file in _smbClientFileHandler.EnumerateFilesAsync(directory, cancellationToken))
                 {
-                    throw new DirectoryNotFoundException(
-                        $"The directory {directory} could not be found or I don't have access to it");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    yield return file;
                 }
 
-                return Directory.EnumerateFiles(directory)
-                    .Select(Path.GetFileName)
-                    .Where(f => !string.IsNullOrEmpty(f))!;
-            }, cancellationToken);
+                yield break; // SMB branch handled
+            }
+
+            // Local filesystem branch
+            if (!Directory.Exists(directory))
+            {
+                throw new DirectoryNotFoundException(
+                    $"The directory {directory} could not be found or I don't have access to it");
+            }
+
+            foreach (var filePath in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                yield return filePath;
+            }
         }
 
         /// <inheritdoc/>
-        public async Task<bool> FileExistsAsync(string fileName, string directory,
+        public async Task<bool> FileExistsAsync(string filePath,
             CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(fileName))
-                throw new ArgumentException("File name cannot be null or empty", nameof(fileName));
-            if (string.IsNullOrWhiteSpace(directory))
-                throw new ArgumentException("Directory path cannot be null or empty", nameof(directory));
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("File path cannot be null or empty", nameof(filePath));
 
             if (_useSmbClient)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                return await _smbClientFileHandler.FileExistsAsync(fileName, directory, cancellationToken);
+                return await _smbClientFileHandler.FileExistsAsync(filePath, cancellationToken);
             }
 
             // Use direct IO operations for UNC paths - wrap in Task.Run to avoid blocking
             return await Task.Run(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var filePath = Path.Combine(directory, fileName);
                 return File.Exists(filePath);
             }, cancellationToken);
         }
 
         /// <inheritdoc/>
-        public async Task<Stream> ReadFileAsync(string directory, string fileName,
+        public async Task<Stream> ReadFileAsync(string filePath,
             CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(directory))
-                throw new ArgumentException("Directory path cannot be null or empty", nameof(directory));
-            if (string.IsNullOrWhiteSpace(fileName))
-                throw new ArgumentException("File name cannot be null or empty", nameof(fileName));
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("File path cannot be null or empty", nameof(filePath));
 
             if (_useSmbClient)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                return await _smbClientFileHandler.GetFileStreamAsync(directory, fileName, cancellationToken);
+                return await _smbClientFileHandler.GetFileStreamAsync(filePath, cancellationToken);
             }
 
             // Use direct IO - safely combine paths - wrap in Task.Run to avoid blocking
             return await Task.Run(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
-                var filePath = Path.Combine(directory, fileName);
 
                 if (!File.Exists(filePath))
                 {
@@ -302,7 +299,7 @@ namespace SmbSharp.Business
             if (string.IsNullOrEmpty(fileName))
                 throw new ArgumentException("Invalid file path - cannot determine file name", nameof(filePath));
 
-            return await _smbClientFileHandler.WriteFileAsync(directory, fileName, stream, writeMode,
+            return await _smbClientFileHandler.WriteFileAsync(filePath, stream, writeMode,
                 cancellationToken);
         }
 
@@ -340,7 +337,7 @@ namespace SmbSharp.Business
             if (string.IsNullOrWhiteSpace(sourceFilePath))
                 throw new ArgumentException("Source file path cannot be null or empty", nameof(sourceFilePath));
             if (string.IsNullOrWhiteSpace(destinationFilePath))
-                throw new ArgumentException("Destination file path cannot be null or empty",
+                throw new ArgumentException("Destination file directory cannot be null or empty",
                     nameof(destinationFilePath));
 
             if (_useSmbClient)
@@ -349,39 +346,20 @@ namespace SmbSharp.Business
 
                 // For smbclient, we need to download and re-upload since there's no native move command.
                 // This operation is made atomic with retry logic and rollback on failure.
-                var sourceDir = Path.GetDirectoryName(sourceFilePath);
-                if (string.IsNullOrEmpty(sourceDir))
-                    throw new ArgumentException("Invalid source path - cannot determine directory",
-                        nameof(sourceFilePath));
-
-                var sourceFileName = Path.GetFileName(sourceFilePath);
-                if (string.IsNullOrEmpty(sourceFileName))
-                    throw new ArgumentException("Invalid source path - cannot determine file name",
-                        nameof(sourceFilePath));
-
-                var destDir = Path.GetDirectoryName(destinationFilePath);
-                if (string.IsNullOrEmpty(destDir))
-                    throw new ArgumentException("Invalid destination path - cannot determine directory",
-                        nameof(destinationFilePath));
-
-                var destFileName = Path.GetFileName(destinationFilePath);
-                if (string.IsNullOrEmpty(destFileName))
-                    throw new ArgumentException("Invalid destination path - cannot determine file name",
-                        nameof(destinationFilePath));
 
                 bool destinationWritten = false;
                 try
                 {
                     // Step 1: Read source file into memory
                     await using var stream =
-                        await _smbClientFileHandler.GetFileStreamAsync(sourceDir, sourceFileName, cancellationToken);
+                        await _smbClientFileHandler.GetFileStreamAsync(sourceFilePath, cancellationToken);
 
                     // Step 2: Write to destination location
-                    await _smbClientFileHandler.WriteFileAsync(destDir, destFileName, stream, cancellationToken);
+                    await _smbClientFileHandler.WriteFileAsync(destinationFilePath, stream, cancellationToken);
                     destinationWritten = true;
 
                     // Step 3: Delete source file to complete the move
-                    await _smbClientFileHandler.DeleteFileAsync(sourceDir, sourceFileName, cancellationToken);
+                    await _smbClientFileHandler.DeleteFileAsync(sourceFilePath, cancellationToken);
 
                     return true;
                 }
@@ -401,7 +379,7 @@ namespace SmbSharp.Business
                             await Task.Delay(100, cancellationToken);
 
                             // Retry: Attempt to delete source file one more time
-                            await _smbClientFileHandler.DeleteFileAsync(sourceDir, sourceFileName, cancellationToken);
+                            await _smbClientFileHandler.DeleteFileAsync(sourceFilePath, cancellationToken);
 
                             // Success: Retry completed the move operation
                             return true;
@@ -416,7 +394,7 @@ namespace SmbSharp.Business
 
                             try
                             {
-                                await _smbClientFileHandler.DeleteFileAsync(destDir, destFileName, cancellationToken);
+                                await _smbClientFileHandler.DeleteFileAsync(destinationFilePath, cancellationToken);
                             }
                             catch
                             {
@@ -436,6 +414,7 @@ namespace SmbSharp.Business
             return await Task.Run(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
                 File.Move(sourceFilePath, destinationFilePath);
                 return true;
             }, cancellationToken);
@@ -464,15 +443,7 @@ namespace SmbSharp.Business
                 }, cancellationToken);
             }
 
-            var directory = Path.GetDirectoryName(filePath);
-            if (string.IsNullOrEmpty(directory))
-                throw new ArgumentException("Invalid file path - cannot determine directory", nameof(filePath));
-
-            var fileName = Path.GetFileName(filePath);
-            if (string.IsNullOrEmpty(fileName))
-                throw new ArgumentException("Invalid file path - cannot determine file name", nameof(filePath));
-
-            return await _smbClientFileHandler.DeleteFileAsync(directory, fileName, cancellationToken);
+            return await _smbClientFileHandler.DeleteFileAsync(filePath, cancellationToken);
         }
 
         /// <inheritdoc/>
