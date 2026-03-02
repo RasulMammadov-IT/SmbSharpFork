@@ -249,13 +249,6 @@ namespace SmbSharp.Business
         public async Task<bool> WriteFileAsync(string filePath, Stream stream,
             CancellationToken cancellationToken = default)
         {
-            return await WriteFileAsync(filePath, stream, FileWriteMode.Overwrite, cancellationToken);
-        }
-
-        /// <inheritdoc/>
-        public async Task<bool> WriteFileAsync(string filePath, Stream stream, FileWriteMode writeMode,
-            CancellationToken cancellationToken = default)
-        {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("File path cannot be null or empty", nameof(filePath));
             if (stream == null)
@@ -276,30 +269,14 @@ namespace SmbSharp.Business
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Map FileWriteMode to FileMode
-                    FileMode fileMode = writeMode switch
-                    {
-                        FileWriteMode.CreateNew => FileMode.CreateNew,
-                        FileWriteMode.Append => FileMode.Append,
-                        _ => FileMode.Create
-                    };
-
-                    await using var fileStream = new FileStream(filePath, fileMode, FileAccess.Write, FileShare.None,
+                    await using var fileStream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                         4096, FileOptions.Asynchronous);
                     await stream.CopyToAsync(fileStream, cancellationToken);
                     return true;
                 }, cancellationToken);
             }
 
-            var directory = Path.GetDirectoryName(filePath);
-            if (string.IsNullOrEmpty(directory))
-                throw new ArgumentException("Invalid file path - cannot determine directory", nameof(filePath));
-
-            var fileName = Path.GetFileName(filePath);
-            if (string.IsNullOrEmpty(fileName))
-                throw new ArgumentException("Invalid file path - cannot determine file name", nameof(filePath));
-
-            return await _smbClientFileHandler.WriteFileAsync(filePath, stream, writeMode,
+            return await _smbClientFileHandler.WriteFileAsync(filePath, stream,
                 cancellationToken);
         }
 
@@ -416,6 +393,103 @@ namespace SmbSharp.Business
                 cancellationToken.ThrowIfCancellationRequested();
 
                 File.Move(sourceFilePath, destinationFilePath);
+                return true;
+            }, cancellationToken);
+        }
+
+
+        /// <inheritdoc/>
+        public async Task<bool> MoveFileAsync(Stream stream, string sourceFilePath, string destinationFilePath,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(sourceFilePath))
+                throw new ArgumentException("Source file path cannot be null or empty", nameof(sourceFilePath));
+            if (string.IsNullOrWhiteSpace(destinationFilePath))
+                throw new ArgumentException("Destination file directory cannot be null or empty",
+                    nameof(destinationFilePath));
+
+            if (_useSmbClient)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // For smbclient, we need to download and re-upload since there's no native move command.
+                // This operation is made atomic with retry logic and rollback on failure.
+
+                bool destinationWritten = false;
+                try
+                {
+                    // Step 1: Write to destination location
+                    await _smbClientFileHandler.WriteFileAsync(destinationFilePath, stream, cancellationToken);
+                    destinationWritten = true;
+
+                    // Step 2: Delete source file to complete the move
+                    await _smbClientFileHandler.DeleteFileAsync(sourceFilePath, cancellationToken);
+
+                    return true;
+                }
+                catch
+                {
+                    // Atomic operation: If destination was written but source deletion failed,
+                    // retry once to handle transient issues before rolling back
+                    if (destinationWritten)
+                    {
+                        try
+                        {
+                            _logger.LogWarning(
+                                "Failed to delete source file {SourceFilePath} after copying, retrying once...",
+                                sourceFilePath);
+
+                            // Brief delay to handle transient network or file lock issues
+                            await Task.Delay(100, cancellationToken);
+
+                            // Retry: Attempt to delete source file one more time
+                            await _smbClientFileHandler.DeleteFileAsync(sourceFilePath, cancellationToken);
+
+                            // Success: Retry completed the move operation
+                            return true;
+                        }
+                        catch
+                        {
+                            // Rollback: Both attempts failed, delete destination to maintain atomicity
+                            // This ensures the file exists in only the original location
+                            _logger.LogError(
+                                "Retry failed to delete source file {SourceFilePath}, rolling back destination",
+                                sourceFilePath);
+
+                            try
+                            {
+                                await _smbClientFileHandler.DeleteFileAsync(destinationFilePath, cancellationToken);
+                            }
+                            catch
+                            {
+                                // Cleanup failed - log but don't mask the original exception
+                                _logger.LogError(
+                                    "Failed to cleanup destination file {DestinationFilePath} after move operation failed",
+                                    destinationFilePath);
+                            }
+                        }
+                    }
+
+                    throw;
+                }
+            }
+
+            // Use direct IO operations for UNC paths - wrap in Task.Run to avoid blocking
+            return await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    File.Move(sourceFilePath, destinationFilePath);
+                }
+                catch (IOException ex) when (
+                    ex.HResult == unchecked((int)0x80070050) ||  // ERROR_FILE_EXISTS
+                    ex.HResult == unchecked((int)0x800700B7))    // ERROR_ALREADY_EXISTS
+                {
+                    throw new FileAlreadyExistsException($"File already exists: {destinationFilePath}");
+                }
+
                 return true;
             }, cancellationToken);
         }

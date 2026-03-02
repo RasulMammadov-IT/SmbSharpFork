@@ -277,88 +277,45 @@ namespace SmbSharp.Business.SmbClient
                 FileOptions.DeleteOnClose | FileOptions.Asynchronous);
         }
 
-        public async Task<bool> WriteFileAsync(string filePath, Stream stream,
-            CancellationToken cancellationToken = default)
+        public async Task<bool> WriteFileAsync(string filePath, Stream stream, CancellationToken cancellationToken = default)
         {
-            return await WriteFileAsync(filePath, stream, FileWriteMode.Overwrite, cancellationToken);
-        }
-
-        public async Task<bool> WriteFileAsync(string filePath, Stream stream,
-            FileWriteMode writeMode, CancellationToken cancellationToken = default)
-        {
-            var (fileName, directoryName) = GetFileAndDirectoryName(filePath);
 
             // Parse SMB path: //server/share/path or \\server\share\path
-            var (server, share, remotePath) = ParseSmbPath(directoryName);
+            var (server, share, relativePath) = ParseSmbPath(filePath);
+
+            var (fileName, relativeDirectoryName) = GetFileAndDirectoryName(relativePath);
 
             // Create a temporary local file to upload
             var tempFilePath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_{fileName}");
 
             try
             {
-                var remoteFilePath = string.IsNullOrEmpty(remotePath)
-                    ? fileName
-                    : $"{remotePath}/{fileName}";
 
-                // Handle different write modes
-                if (writeMode == FileWriteMode.CreateNew)
+                try
                 {
-                    // Check if file exists first
-                    try
-                    {
-                        var checkCommand = $"ls \"{remoteFilePath}\"";
-                        await ExecuteSmbClientCommandAsync(server, share, checkCommand, directoryName, false, cancellationToken);
-                        // If we get here, file exists
-                        throw new IOException($"File already exists: {directoryName}/{fileName}");
-                    }
-                    catch (FileNotFoundException)
-                    {
-                        // Good - file doesn't exist, continue
-                    }
+                    var checkCommand = string.IsNullOrEmpty(relativeDirectoryName)
+                        ? $"ls \"{fileName}\""
+                        : $"cd \"{relativeDirectoryName}\"; ls \"{fileName}\"";
+
+                    await ExecuteSmbClientCommandAsync(server, share, checkCommand, relativeDirectoryName, false, cancellationToken);
+
+                    // If we get here, file exists
+                    throw new FileAlreadyExistsException($"File already exists: {relativeDirectoryName}/{fileName}");
                 }
-                else if (writeMode == FileWriteMode.Append)
+                catch (FileNotFoundException)
                 {
-                    // For append mode, download existing file first if it exists
-                    try
-                    {
-                        var existingTempFile =
-                            Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}_existing_{fileName}");
-                        var getCommand = $"get \"{remoteFilePath}\" \"{existingTempFile}\"";
-                        await ExecuteSmbClientCommandAsync(server, share, getCommand, directoryName, false, cancellationToken);
-
-                        // Copy existing file to temp file, then append new content
-                        await using (var fileStream = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write))
-                        {
-                            await using (var existingStream =
-                                         new FileStream(existingTempFile, FileMode.Open, FileAccess.Read))
-                            {
-                                await existingStream.CopyToAsync(fileStream, cancellationToken);
-                            }
-
-                            await stream.CopyToAsync(fileStream, cancellationToken);
-                        }
-
-                        // Clean up existing temp file
-                        if (File.Exists(existingTempFile))
-                            File.Delete(existingTempFile);
-                    }
-                    catch (FileNotFoundException)
-                    {
-                        // File doesn't exist, just write new content
-                        await using var fileStream = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write);
-                        await stream.CopyToAsync(fileStream, cancellationToken);
-                    }
+                    // Good - file doesn't exist, continue
                 }
-                else // Overwrite
-                {
-                    // Write stream to temp file
-                    await using var fileStream = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write);
-                    await stream.CopyToAsync(fileStream, cancellationToken);
-                }
+
+
+                await using var fileStream = new FileStream(tempFilePath, FileMode.CreateNew, FileAccess.Write);
+
+                await stream.CopyToAsync(fileStream, cancellationToken);
+                await fileStream.FlushAsync();
 
                 // Upload file using smbclient
-                var command = $"put \"{tempFilePath}\" \"{remoteFilePath}\"";
-                await ExecuteSmbClientCommandAsync(server, share, command, directoryName, false, cancellationToken);
+                var command = $"put \"{tempFilePath}\" \"{relativePath}\"";
+                await ExecuteSmbClientCommandAsync(server, share, command, relativePath, false, cancellationToken);
 
                 return true;
             }
@@ -401,8 +358,44 @@ namespace SmbSharp.Business.SmbClient
                 return true;
             }
 
-            var command = $"mkdir \"{remotePath}\"";
-            await ExecuteSmbClientCommandAsync(server, share, command, smbPath, false, cancellationToken);
+            // Split into parts
+            var parts = remotePath
+                .Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+            // Find deepest existing parent
+            int lastExistingIndex = -1;
+
+            string[] allPathes = new string[parts.Length];
+
+            for (int i = parts.Length; i > 0; i--)
+            {
+                var partial = string.Join("/", parts.Take(i));
+
+                if (await DirectoryExistAsync(server, share, partial, smbPath, cancellationToken))
+                {
+                    lastExistingIndex = i - 1;
+                    break;
+                }
+
+                allPathes[i - 1] = partial;
+            }
+
+            // If none exist, start from root of share
+            int startIndex = lastExistingIndex + 1;
+
+            // Create missing directories one by one
+            for (int i = startIndex; i < parts.Length; i++)
+            {
+                var command = $"mkdir \"{allPathes[i]}\"";
+
+                await ExecuteSmbClientCommandAsync(
+                    server,
+                    share,
+                    command,
+                    smbPath,
+                    false,
+                    cancellationToken);
+            }
 
             return true;
         }
@@ -642,7 +635,7 @@ namespace SmbSharp.Business.SmbClient
 
             if (lastSlashIndex < 0)
             {
-                throw new ArgumentException($"Invalid file path format: {filePath}");
+                return ("", filePath);
             }
 
             string directoryName = filePath.Substring(0, lastSlashIndex);

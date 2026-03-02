@@ -30,14 +30,7 @@ namespace SmbSharp.Business.Interfaces
         /// <summary>
         /// 
         /// </summary>
-        Task<bool> WriteFileAsync(string filePath, Stream stream,
-            CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// 
-        /// </summary>
-        Task<bool> WriteFileAsync(string filePath, Stream stream,
-            FileWriteMode writeMode, CancellationToken cancellationToken = default);
+        Task<bool> WriteFileAsync(string filePath, Stream stream, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// 

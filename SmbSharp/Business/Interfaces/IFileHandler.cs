@@ -58,7 +58,7 @@
         Task<bool> WriteFileAsync(string filePath, string content, CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// Writes the contents of a stream to a file on an SMB share, creating or overwriting the file.
+        /// Writes the contents of a stream to a file on an SMB share, creating the file.
         /// </summary>
         /// <param name="filePath">The full SMB path to the file (e.g., "//server/share/path/file.txt")</param>
         /// <param name="stream">The stream containing the data to write. If the stream is seekable and not at position 0, it will be reset to the beginning.</param>
@@ -71,23 +71,6 @@
         /// If the stream is seekable, it will be reset to position 0 before reading.
         /// </remarks>
         Task<bool> WriteFileAsync(string filePath, Stream stream, CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// Writes the contents of a stream to a file on an SMB share with the specified write mode.
-        /// </summary>
-        /// <param name="filePath">The full SMB path to the file (e.g., "//server/share/path/file.txt")</param>
-        /// <param name="stream">The stream containing the data to write. If the stream is seekable and not at position 0, it will be reset to the beginning.</param>
-        /// <param name="writeMode">Specifies the behavior when the file already exists</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the operation succeeded, false otherwise</returns>
-        /// <exception cref="IOException">Thrown when the SMB operation fails or file already exists with CreateNew mode</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
-        /// <remarks>
-        /// On non-Windows platforms, the stream is copied to a temporary file before being uploaded via smbclient.
-        /// If the stream is seekable, it will be reset to position 0 before reading.
-        /// Append mode is only supported on Windows; on Linux it will download, append, and re-upload the file.
-        /// </remarks>
-        Task<bool> WriteFileAsync(string filePath, Stream stream, Enums.FileWriteMode writeMode, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Creates a directory on an SMB share. Does nothing if the directory already exists.
@@ -136,6 +119,16 @@
         /// </para>
         /// </remarks>
         Task<bool> MoveFileAsync(string sourceFilePath, string destinationFilePath, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Deletes file in sourePath and creates in destinationPath using already prepared stream
+        /// </summary>
+        /// <param name="stream"></param>
+        /// <param name="sourceFilePath"></param>
+        /// <param name="destinationFilePath"></param>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
+        Task<bool> MoveFileAsync(Stream stream, string sourceFilePath, string destinationFilePath, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Deletes a file from an SMB share. Does nothing if the file does not exist.
