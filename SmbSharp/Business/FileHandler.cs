@@ -151,38 +151,6 @@ namespace SmbSharp.Business
         }
 
         /// <inheritdoc/>
-        public async IAsyncEnumerable<string> EnumerateAllFilesAsync(string directory,
-                                                                     [EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            if (string.IsNullOrWhiteSpace(directory))
-                throw new ArgumentException("Directory path cannot be null or empty", nameof(directory));
-
-            // SMB branch
-            if (_useSmbClient)
-            {
-                await foreach (var file in _smbClientFileHandler.EnumerateFilesAsync(directory, cancellationToken))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    yield return file;
-                }
-
-                yield break; // SMB branch handled
-            }
-
-            // Local filesystem branch
-            if (!Directory.Exists(directory))
-            {
-                throw new DirectoryNotFoundException(
-                    $"The directory {directory} could not be found or I don't have access to it");
-            }
-
-            foreach (var filePath in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
-            {
-                yield return filePath;
-            }
-        }
-
-        /// <inheritdoc/>
         public async Task<bool> FileExistsAsync(string filePath,
             CancellationToken cancellationToken = default)
         {
@@ -533,6 +501,38 @@ namespace SmbSharp.Business
 
             // Use direct IO operations for UNC paths - wrap in Task.Run to avoid blocking
             return await Task.Run(() => Directory.Exists(directoryPath), cancellationToken);
+        }
+
+        public async IAsyncEnumerable<string> EnumerateFilesAsync(string directory, bool searchAllDirectories = true, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(directory))
+                throw new ArgumentException("Directory path cannot be null or empty", nameof(directory));
+
+            // SMB branch
+            if (_useSmbClient)
+            {
+                await foreach (var file in _smbClientFileHandler.EnumerateFilesAsync(directory, searchAllDirectories, cancellationToken))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    yield return file;
+                }
+
+                yield break; // SMB branch handled
+            }
+
+            // Local filesystem branch
+            if (!Directory.Exists(directory))
+            {
+                throw new DirectoryNotFoundException(
+                    $"The directory {directory} could not be found or I don't have access to it");
+            }
+
+            var searchOption = searchAllDirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+
+            foreach (var filePath in Directory.EnumerateFiles(directory, "*", searchOption))
+            {
+                yield return filePath;
+            }
         }
     }
 }

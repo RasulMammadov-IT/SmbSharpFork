@@ -120,7 +120,7 @@ Console.WriteLine();
 
         var list = new List<string>();
 
-        await foreach (var file in handler.EnumerateAllFilesAsync(dir))
+        await foreach (var file in handler.EnumerateFilesAsync(dir))
         {
             list.Add(file);
         }

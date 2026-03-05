@@ -7,149 +7,171 @@
     public interface IFileHandler
     {
         /// <summary>
-        /// Enumerates all files in the specified directory on an SMB share.
+        /// Asynchronously enumerates files in the specified directory on an SMB share.
+        /// On windows without WSL Returned files' pathes will use \\Server\Share\RelativePath format
+        /// In Other cases Returned files' pathes will use //Server/Share/RelativePath format
         /// </summary>
-        /// <param name="directory">The SMB directory path (e.g., "//server/share/path" or "\\server\share\path")</param>
-        /// <returns>A collection of file names in the directory (not full paths, just file names)</returns>
-        /// <exception cref="DirectoryNotFoundException">Thrown when the directory does not exist or is not accessible</exception>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
-        IAsyncEnumerable<string> EnumerateAllFilesAsync(string directory, CancellationToken cancellationToken = default);
+        /// <param name="directory">The SMB directory path.</param>
+        /// <param name="searchAllDirectories">
+        /// When <c>true</c>, files in all subdirectories are included; otherwise, only files in the specified directory are returned.
+        /// </param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>An asynchronous stream of file paths found in the directory.</returns>
+        /// <exception cref="DirectoryNotFoundException">
+        /// Thrown when the directory does not exist or is not accessible.
+        /// </exception>
+        /// <exception cref="IOException">
+        /// Thrown when the SMB operation fails.
+        /// </exception>
+        /// <exception cref="OperationCanceledException">
+        /// Thrown when the operation is cancelled.
+        /// </exception>
+        /// <remarks>
+        /// On Windows systems only UNC paths are accepted.
+        /// On non-Windows systems or WSL environments both UNC and Linux paths are accepted.
+        /// </remarks>
+        IAsyncEnumerable<string> EnumerateFilesAsync(string directory, bool searchAllDirectories = true, CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// Checks if a file exists in the specified directory on an SMB share.
+        /// Checks whether a file exists at the specified path.
         /// </summary>
-        /// <param name="fileName">The name of the file to check (not full path, just file name)</param>
-        /// <param name="directory">The SMB directory path (e.g., "//server/share/path" or "\\server\share\path")</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the file exists, false otherwise</returns>
-        /// <exception cref="DirectoryNotFoundException">Thrown when the directory does not exist or is not accessible</exception>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
+        /// <param name="filePath">The full path to the file.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the file exists, otherwise false.</returns>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
+        /// <remarks>
+        /// On Windows systems only UNC paths are accepted.  
+        /// On non-Windows systems or WSL environments both UNC and Linux paths are accepted.
+        /// </remarks>
         Task<bool> FileExistsAsync(string filePath, CancellationToken cancellationToken = default);
 
+
         /// <summary>
-        /// Opens a file for reading from an SMB share and returns a stream.
+        /// Opens a file for reading and returns a stream containing its contents.
         /// The caller is responsible for disposing the returned stream.
         /// </summary>
-        /// <param name="directory">The SMB directory path containing the file</param>
-        /// <param name="filePath">The name of the file to read</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>A stream containing the file contents. The stream must be disposed by the caller.</returns>
-        /// <exception cref="FileNotFoundException">Thrown when the file does not exist or is not accessible</exception>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
+        /// <param name="filePath">The full path to the file.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>A stream containing the file data.</returns>
+        /// <exception cref="FileNotFoundException">Thrown when the file does not exist or is not accessible.</exception>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
         /// <remarks>
-        /// On Windows, returns a FileStream to the UNC path directly.
-        /// On non-Windows platforms, downloads the file to a temporary location and returns a FileStream with DeleteOnClose.
+        /// On Windows systems only UNC paths are accepted.  
+        /// On non-Windows systems or WSL environments both UNC and Linux paths are accepted.
         /// </remarks>
         Task<Stream> ReadFileAsync(string filePath, CancellationToken cancellationToken = default);
 
+
         /// <summary>
-        /// Writes a string to a file on an SMB share, creating or overwriting the file.
-        /// The content is encoded as UTF-8.
+        /// Writes string content to a file, creating a new file at the specified path.
         /// </summary>
-        /// <param name="filePath">The full SMB path to the file (e.g., "//server/share/path/file.txt")</param>
-        /// <param name="content">The string content to write to the file</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the operation succeeded, false otherwise</returns>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
+        /// <param name="filePath">The full destination path.</param>
+        /// <param name="content">Content to write to the file.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the operation succeeded.</returns>
+        /// <exception cref="FileAlreadyExistsException">Thrown when a file already exists at the destination path.</exception>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
+        /// <remarks>
+        /// On Windows systems only UNC paths are accepted.  
+        /// On non-Windows systems or WSL environments both UNC and Linux paths are accepted.
+        /// </remarks>
         Task<bool> WriteFileAsync(string filePath, string content, CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// Writes the contents of a stream to a file on an SMB share, creating the file.
+        /// Writes the contents of a previously fetched stream to the specified destination file.
         /// </summary>
-        /// <param name="filePath">The full SMB path to the file (e.g., "//server/share/path/file.txt")</param>
-        /// <param name="stream">The stream containing the data to write. If the stream is seekable and not at position 0, it will be reset to the beginning.</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the operation succeeded, false otherwise</returns>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
+        /// <param name="filePath">The destination file path.</param>
+        /// <param name="stream">The stream containing the file data.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the operation succeeded.</returns>
+        /// <exception cref="FileAlreadyExistsException">
+        /// Thrown when a file already exists at the destination path.
+        /// </exception>
+        /// <exception cref="IOException">
+        /// Thrown when the SMB write operation fails.
+        /// </exception>
+        /// <exception cref="OperationCanceledException">
+        /// Thrown when the operation is cancelled.
+        /// </exception>
         /// <remarks>
-        /// On non-Windows platforms, the stream is copied to a temporary file before being uploaded via smbclient.
-        /// If the stream is seekable, it will be reset to position 0 before reading.
+        /// Uses retry logic when writing the stream to the destination file.
+        /// The stream is assumed to have been previously fetched from the source location.
         /// </remarks>
         Task<bool> WriteFileAsync(string filePath, Stream stream, CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Creates a directory on an SMB share. Does nothing if the directory already exists.
-        /// </summary>
-        /// <param name="directoryPath">The full SMB path to the directory to create (e.g., "//server/share/path/newdir")</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the operation succeeded, false otherwise</returns>
-        /// <exception cref="ArgumentException">Thrown when the directory path is empty or invalid</exception>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
-        Task<bool> CreateDirectoryAsync(string directoryPath, CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// Moves a file from one location to another on SMB shares.
+        /// Creates a directory and any missing parent directories in the specified path.
         /// </summary>
-        /// <param name="sourceFilePath">The full SMB path to the source file</param>
-        /// <param name="destinationFilePath">The full SMB path to the destination file</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the operation succeeded, false otherwise</returns>
-        /// <exception cref="FileNotFoundException">Thrown when the source file does not exist</exception>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
+        /// <param name="directoryPath">The directory path to create.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the operation succeeded.</returns>
+        /// <exception cref="ArgumentException">Thrown when the provided path is not a directory path.</exception>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
         /// <remarks>
-        /// <para>
-        /// <strong>Windows:</strong> Uses File.Move directly - efficient, atomic operation that just updates file metadata.
-        /// </para>
-        /// <para>
-        /// <strong>Linux:</strong> Performs a copy-then-delete operation since smbclient has no native move command.
-        /// This means:
-        /// - The file is downloaded to a temporary location
-        /// - Then uploaded to the destination
-        /// - Then deleted from the source
-        /// - This requires 2x the file size in temporary disk space
-        /// - Network transfer time is 2x (download + upload)
-        /// - The operation IS atomic with retry logic - if source deletion fails after copying, it retries once, then rolls back the destination if retry fails
-        /// - For large files, this can be slow and resource-intensive
-        /// </para>
-        /// <para>
-        /// <strong>Atomicity Guarantee:</strong> The operation ensures the file exists in only one location. If the source
-        /// deletion fails, a retry is attempted after a brief delay. If both attempts fail, the destination file is
-        /// automatically deleted to rollback the operation and maintain consistency.
-        /// </para>
-        /// <para>
-        /// <strong>Recommendation:</strong> If you're moving large files on Linux, consider using alternative approaches
-        /// or be aware of the performance implications.
-        /// </para>
+        /// The creation process starts from the deepest directory and moves upward to avoid
+        /// unnecessary access checks on parent directories due to permission or performance constraints.
+        /// Missing directories are created as needed.
+        /// </remarks>
+        Task<bool> CreateDirectoryAsync(string directoryPath, CancellationToken cancellationToken = default);
+
+
+        /// <summary>
+        /// Moves a file from one location to another.
+        /// </summary>
+        /// <param name="sourceFilePath">The source file path.</param>
+        /// <param name="destinationFilePath">The destination file path.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the operation succeeded.</returns>
+        /// <exception cref="FileNotFoundException">Thrown when the source file does not exist.</exception>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
+        /// <remarks>
+        /// Uses a single retry attempt to try to maintain atomic behavior, though full atomicity cannot be guaranteed.
         /// </remarks>
         Task<bool> MoveFileAsync(string sourceFilePath, string destinationFilePath, CancellationToken cancellationToken = default);
 
+
         /// <summary>
-        /// Deletes file in sourePath and creates in destinationPath using already prepared stream
+        /// Moves a file using a previously fetched stream.
         /// </summary>
-        /// <param name="stream"></param>
-        /// <param name="sourceFilePath"></param>
-        /// <param name="destinationFilePath"></param>
-        /// <param name="cancellationToken"></param>
-        /// <returns></returns>
+        /// <param name="stream">The stream containing file data.</param>
+        /// <param name="sourceFilePath">The original file path.</param>
+        /// <param name="destinationFilePath">The destination file path.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the operation succeeded.</returns>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
+        /// <remarks>
+        /// Writes the stream to the destination and deletes the source file.  
+        /// Uses a single retry attempt to try to maintain atomic behavior, though full atomicity cannot be guaranteed.
+        /// </remarks>
         Task<bool> MoveFileAsync(Stream stream, string sourceFilePath, string destinationFilePath, CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// Deletes a file from an SMB share. Does nothing if the file does not exist.
-        /// </summary>
-        /// <param name="filePath">The full SMB path to the file to delete (e.g., "//server/share/path/file.txt")</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the operation succeeded, false otherwise</returns>
-        /// <exception cref="IOException">Thrown when the SMB operation fails</exception>
-        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled</exception>
-        Task<bool> DeleteFileAsync(string filePath, CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// Tests connectivity to an SMB share or directory.
+        /// Deletes the file at the specified path if it exists.
         /// </summary>
-        /// <param name="directoryPath">The SMB path to test (e.g., "//server/share" or "//server/share/path")</param>
-        /// <param name="cancellationToken">Token to cancel the operation</param>
-        /// <returns>True if the connection succeeds and the path is accessible, false otherwise</returns>
+        /// <param name="filePath">The full file path.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the operation succeeded.</returns>
+        /// <exception cref="IOException">Thrown when the SMB operation fails.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when the operation is cancelled.</exception>
+        Task<bool> DeleteFileAsync(string filePath, CancellationToken cancellationToken = default);
+
+
+        /// <summary>
+        /// Tests whether the application can connect to the specified destination.
+        /// </summary>
+        /// <param name="directoryPath">The directory path to test.</param>
+        /// <param name="cancellationToken">Token to cancel the operation.</param>
+        /// <returns>True if the destination is reachable and accessible, otherwise false.</returns>
         /// <remarks>
-        /// On Windows, checks if the directory exists.
-        /// On non-Windows platforms, attempts to list files using smbclient.
-        /// This method does not throw exceptions; it returns false on failure.
+        /// If the path is not a directory, an exception may be thrown on non-Windows or WSL environments.
         /// </remarks>
         Task<bool> CanConnectAsync(string directoryPath, CancellationToken cancellationToken = default);
     }
