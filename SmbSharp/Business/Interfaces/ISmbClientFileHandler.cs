@@ -16,6 +16,7 @@ namespace SmbSharp.Business.Interfaces
         /// <summary>
         /// Asynchronously enumerates files in the specified SMB directory.
         /// Returned files' pathes will use //Server/Share/RelativePath format
+        /// If item's attributes does not have D (directory) it will be considered a file in not Windows systems and windows with WSL
         /// </summary>
         /// <param name="smbPath">The SMB directory path (\\server\share or //server/share).</param>
         /// <param name="searchAllDirectories">

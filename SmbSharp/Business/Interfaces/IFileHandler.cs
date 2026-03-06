@@ -10,6 +10,7 @@
         /// Asynchronously enumerates files in the specified directory on an SMB share.
         /// On windows without WSL Returned files' pathes will use \\Server\Share\RelativePath format
         /// In Other cases Returned files' pathes will use //Server/Share/RelativePath format
+        /// If item's attributes does not have D (directory) it will be considered a file in not Windows systems and windows with WSL
         /// </summary>
         /// <param name="directory">The SMB directory path.</param>
         /// <param name="searchAllDirectories">

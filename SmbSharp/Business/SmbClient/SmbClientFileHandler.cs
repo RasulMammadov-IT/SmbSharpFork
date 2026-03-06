@@ -90,86 +90,58 @@ namespace SmbSharp.Business.SmbClient
             _password = password;
             _domain = domain;
         }
-
-        private async Task<List<FileEntry>> EnumerateInternalAsync(string server,
-                                                                   string share,
-                                                                   string? relativeCurrentPath,
-                                                                   string directorySmbFullPath,
-                                                                   CancellationToken cancellationToken)
+        public async IAsyncEnumerable<string> EnumerateFilesAsync(string smbPath, bool searchAllDirectories = true, CancellationToken cancellationToken = default)
         {
-            List<FileEntry> entries = new();
+            var files = new List<string>();
 
-            var command = string.IsNullOrEmpty(relativeCurrentPath)
-                ? "ls"
-                : $"cd \"{relativeCurrentPath}\"; ls";
+            // Parse SMB path: //server/share/path or \\server\share\path
+            var (server, share, path) = ParseSmbPath(smbPath);
 
-
-            string output = null;
-
-            output = await ExecuteSmbClientCommandAsync(
-                server,
-                share,
-                command,
-                directorySmbFullPath,
-                false,
-                cancellationToken);
-
-            if(output == null)
+            if (searchAllDirectories is false)
             {
-                return entries;
-            }
+                var entriesInScope = await EnumerateInternalAsync(server, share, path, smbPath!, cancellationToken);
 
-            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-
-            // Parse smbclient ls output. Format per line (2 leading spaces):
-            //   filename                            A      1234  Mon Jan  1 00:00:00 2024
-            // Filenames may contain spaces, so we match via regex rather than whitespace split.
-            foreach (var line in lines)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (line.Contains("blocks of size") || line.Contains("blocks available"))
-                    continue;
-
-                var match = SmbLsLineRegexInstance.Match(line);
-                if (!match.Success)
-                    continue;
-
-                var objectName = match.Groups[1].Value;
-                var attributes = match.Groups[2].Value;
-
-                // Skip . and ..
-                if (objectName == "." || objectName == "..")
-                    continue;
-
-                var relativeFullPath = string.IsNullOrEmpty(relativeCurrentPath)
-                    ? objectName
-                    : $"{relativeCurrentPath}/{objectName}";
-
-                var smbFullPath = string.IsNullOrEmpty(directorySmbFullPath)
-                    ? objectName
-                    : $"{directorySmbFullPath}/{objectName}";
-
-                var entry = new FileEntry
+                foreach (var entry in entriesInScope)
                 {
-                    ObjectName = objectName,
-                    RelativeFullPath = relativeFullPath,
-                    SMBFullPath = smbFullPath.Replace('\\', '/'),
-                    IsDirectory = attributes.Contains("D")
-                };
+                    if (entry.IsDirectory == false)
+                    {
+                        yield return entry.SMBFullPath!;
+                    }
+                }
 
-                entries.Add(entry);
+                yield break;
             }
 
-            return entries;
-        }
+            Queue<FileEntry> directories = new();
 
-        private class FileEntry
-        {
-            public string? ObjectName { get; set; }
-            public string? RelativeFullPath { get; set; }
-            public string? SMBFullPath { get; set; }
-            public bool IsDirectory { get; set; }
+            directories.Enqueue(new FileEntry()
+            {
+                RelativeFullPath = path,
+                SMBFullPath = smbPath,
+                IsDirectory = true
+            });
+
+            while (directories.Count > 0)
+            {
+                var currentFileEntry = directories.Dequeue();
+
+                var entriesInScope = await EnumerateInternalAsync(server, share, currentFileEntry.RelativeFullPath, currentFileEntry.SMBFullPath!, cancellationToken);
+
+                foreach (var entry in entriesInScope)
+                {
+                    if (entry.IsDirectory)
+                    {
+                        directories.Enqueue(entry);
+                    }
+                    else
+                    {
+                        yield return entry.SMBFullPath!;
+                    }
+                }
+            }
+
+            yield break;
+
         }
 
         public async Task<bool> FileExistsAsync(string filePath,
@@ -453,11 +425,6 @@ namespace SmbSharp.Business.SmbClient
                 var executable = _useWsl ? "wsl" : "smbclient";
                 var result = await _processWrapper.ExecuteAsync(executable, argumentList, null, cancellationToken);
 
-                if (result.ExitCode == 0)
-                {
-                    return result.StandardOutput;
-                }
-
                 // Try to differentiate error types based on smbclient error messages
                 // Check both stdout and stderr as smbclient can output errors to either
                 var errorOutput = $"{result.StandardOutput} {result.StandardError}";
@@ -473,7 +440,7 @@ namespace SmbSharp.Business.SmbClient
                         $"The specified path was not found on {contextPath}", contextPath);
                 }
 
-                if (errorLower.Contains("access denied") ||
+                else if (errorLower.Contains("access denied") ||
                     errorLower.Contains("permission denied") ||
                     errorLower.Contains("nt_status_access_denied") ||
                     errorLower.Contains("logon failure"))
@@ -481,13 +448,16 @@ namespace SmbSharp.Business.SmbClient
                     throw new UnauthorizedAccessException(
                         $"Access denied to {contextPath}: {result.StandardError}");
                 }
-
-                if (errorLower.Contains("bad network path") ||
+                else if (errorLower.Contains("bad network path") ||
                     errorLower.Contains("network name not found") ||
                     errorLower.Contains("nt_status_bad_network_name"))
                 {
                     throw new DirectoryNotFoundException(
                         $"The network path was not found: {contextPath}");
+                }
+                else if (result.ExitCode == 0)
+                {
+                    return result.StandardOutput;
                 }
 
                 // Generic error for everything else
@@ -599,58 +569,86 @@ namespace SmbSharp.Business.SmbClient
             return (fileName, directoryName);
         }
 
-        public async IAsyncEnumerable<string> EnumerateFilesAsync(string smbPath, bool searchAllDirectories = true, CancellationToken cancellationToken = default)
+        private async Task<List<FileEntry>> EnumerateInternalAsync(string server,
+                                                                   string share,
+                                                                   string? relativeCurrentPath,
+                                                                   string directorySmbFullPath,
+                                                                   CancellationToken cancellationToken)
         {
-            var files = new List<string>();
+            List<FileEntry> entries = new();
 
-            // Parse SMB path: //server/share/path or \\server\share\path
-            var (server, share, path) = ParseSmbPath(smbPath);
+            var command = string.IsNullOrEmpty(relativeCurrentPath)
+                ? "ls"
+                : $"cd \"{relativeCurrentPath}\"; ls";
 
-            if (searchAllDirectories is false)
+
+            string output = null;
+
+            output = await ExecuteSmbClientCommandAsync(
+                server,
+                share,
+                command,
+                directorySmbFullPath,
+                false,
+                cancellationToken);
+
+            if (output == null)
             {
-                var entriesInScope = await EnumerateInternalAsync(server, share, path, smbPath!, cancellationToken);
-
-                foreach (var entry in entriesInScope)
-                {
-                    if (entry.IsDirectory == false)
-                    {
-                        yield return entry.SMBFullPath!;
-                    }
-                }
-
-                yield break;
+                return entries;
             }
 
-            Queue<FileEntry> directories = new();
+            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-            directories.Enqueue(new FileEntry()
+            // Parse smbclient ls output. Format per line (2 leading spaces):
+            //   filename                            A      1234  Mon Jan  1 00:00:00 2024
+            // Filenames may contain spaces, so we match via regex rather than whitespace split.
+            foreach (var line in lines)
             {
-                RelativeFullPath = path,
-                SMBFullPath = smbPath,
-                IsDirectory = true
-            });
+                cancellationToken.ThrowIfCancellationRequested();
 
-            while (directories.Count > 0)
-            {
-                var currentFileEntry = directories.Dequeue();
+                if (line.Contains("blocks of size") || line.Contains("blocks available"))
+                    continue;
 
-                var entriesInScope = await EnumerateInternalAsync(server, share, currentFileEntry.RelativeFullPath, currentFileEntry.SMBFullPath!, cancellationToken);
+                var match = SmbLsLineRegexInstance.Match(line);
+                if (!match.Success)
+                    continue;
 
-                foreach (var entry in entriesInScope)
+                var objectName = match.Groups[1].Value;
+                var attributes = match.Groups[2].Value;
+
+                // Skip . and ..
+                if (objectName == "." || objectName == "..")
+                    continue;
+
+                var relativeFullPath = string.IsNullOrEmpty(relativeCurrentPath)
+                    ? objectName
+                    : $"{relativeCurrentPath}/{objectName}";
+
+                var smbFullPath = string.IsNullOrEmpty(directorySmbFullPath)
+                    ? objectName
+                    : $"{directorySmbFullPath}/{objectName}";
+
+                var entry = new FileEntry
                 {
-                    if (entry.IsDirectory)
-                    {
-                        directories.Enqueue(entry);
-                    }
-                    else
-                    {
-                        yield return entry.SMBFullPath!;
-                    }
-                }
+                    ObjectName = objectName,
+                    RelativeFullPath = relativeFullPath,
+                    SMBFullPath = smbFullPath.Replace('\\', '/'),
+                    IsDirectory = attributes.Contains("D")
+                };
+
+                entries.Add(entry);
             }
 
-            yield break;
-
+            return entries;
         }
+
+        private class FileEntry
+        {
+            public string? ObjectName { get; set; }
+            public string? RelativeFullPath { get; set; }
+            public string? SMBFullPath { get; set; }
+            public bool IsDirectory { get; set; }
+        }
+
     }
 }
